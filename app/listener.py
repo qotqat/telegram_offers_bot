@@ -18,7 +18,7 @@ from telethon import TelegramClient, events
 from telethon.tl.types import MessageEntityTextUrl, MessageEntityUrl
 from telethon.utils import get_peer_id
 
-from . import db
+from . import db, filters
 from .config import Config
 from .ingest import BuildFailure, build_offer
 from .models import Offer
@@ -135,16 +135,29 @@ async def process_message(
         log.warning("invalid offer %s/%s: %s", channel_label, msg_id, exc)
         return None
 
-    if getattr(message, "photo", None):
+    decision = filters.evaluate_offer(conn, offer, config)
+
+    # Only accepted offers need media; rejected rows are stored text-only.
+    if decision.accepted and getattr(message, "photo", None):
         image_path = await download_photo(
             client, message, config.media_dir, config.max_image_bytes, offer.content_hash
         )
         if image_path:
             offer.image_path = image_path
 
-    offer_id = db.insert_offer(conn, offer)
+    offer_id = filters.save_offer(conn, offer, decision)
     if offer_id is None:
         log.info("duplicate skipped: %s", offer.title)
+        return None
+
+    if not decision.accepted:
+        log.info(
+            "rejected #%d [%s] %s: %s",
+            offer_id,
+            channel_label,
+            offer.title,
+            decision.detail,
+        )
         return None
 
     log.info(

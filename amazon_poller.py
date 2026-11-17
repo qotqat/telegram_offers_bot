@@ -73,7 +73,8 @@ def print_result(result: amazon.PollResult) -> None:
     print(
         f"{result.searches} search(es), {result.items} item(s), "
         f"{result.stored} new, {result.duplicates} duplicate(s), "
-        f"{result.skipped} skipped, {len(result.errors)} error(s)"
+        f"{result.rejected} filtered, {result.skipped} skipped, "
+        f"{len(result.errors)} error(s)"
     )
     _print_errors(result.errors)
 

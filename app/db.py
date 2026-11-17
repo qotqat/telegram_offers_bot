@@ -192,11 +192,25 @@ def offer_exists_by_source(
     return row is not None
 
 
-def recent_offers(conn: sqlite3.Connection, limit: int = 500) -> list[StoredOffer]:
-    """Most recent offers, used as the fuzzy-dedupe comparison window."""
-    rows = conn.execute(
-        "SELECT * FROM offers ORDER BY id DESC LIMIT ?", (limit,)
-    ).fetchall()
+def recent_offers(
+    conn: sqlite3.Connection,
+    limit: int = 500,
+    *,
+    include_rejected: bool = True,
+) -> list[StoredOffer]:
+    """Most recent offers, used as the fuzzy-dedupe comparison window.
+
+    The filter pipeline asks for accepted offers only, so a deal rejected for
+    an unrelated reason cannot veto a later, legitimate offer.
+    """
+    sql = "SELECT * FROM offers"
+    params: list[object] = []
+    if not include_rejected:
+        sql += " WHERE status != ?"
+        params.append(STATUS_REJECTED)
+    sql += " ORDER BY id DESC LIMIT ?"
+    params.append(limit)
+    rows = conn.execute(sql, params).fetchall()
     return [_row_to_offer(row) for row in rows]
 
 

@@ -11,8 +11,8 @@ channels run by a single bot.
 | **1. Foundations** | Skeleton, `.env` config + validation, SQLite schema/access layer, self-check tooling, tests | ✅ done |
 | **2. Telegram listener** | Telethon session, 10 sources, live + 50-msg catch-up, media capture, normalize + hash insert | ✅ done |
 | **3. Amazon ingestion** | Creators API client (Branch A) + disabled-by-default poller (Branch B) | ✅ done |
-| **4. Filters & dedupe** | rapidfuzz near-dup, discount/keyword/source-cap filters, auto-approve | pending |
-| **5. Broadcaster** | `all` / `route` fan-out, AR/EN templates, buttons, rate limits, per-channel error isolation | pending |
+| **4. Filters & dedupe** | rapidfuzz near-dup, discount/keyword/source-cap filters, auto-approve | ✅ done |
+| **5. Broadcaster** | `all` / `route` fan-out, AR/EN templates, buttons, rate limits, per-channel error isolation | next |
 | **6. Admin & hardening** | `/pause` `/resume` `/stats`, crash alerts, rotating logs, graceful shutdown | pending |
 | **7. Deploy** | Docker Compose (3 services, shared `/data`), free host, soak test, runbook | pending |
 
@@ -73,6 +73,7 @@ app/
   config.py         # .env parsing + validation (single source of truth)
   db.py             # SQLite (WAL) schema, migrations and access layer
   ingest.py         # post -> Offer: link pick, price/discount parsing, hash
+  filters.py        # keyword/discount/fuzzy dedupe/per-source cap + auto-approve
   amazon.py         # Creators API client + poller (SearchItems -> offers)
   listener.py       # Telethon catch-up + live message ingestion
   models.py         # Offer / StoredOffer / Delivery / Stats
@@ -84,7 +85,7 @@ scripts/
   check_setup.py    # kickoff self-check
   init_db.py        # schema creation / verification
   list_offers.py    # inspect recent rows (M1 check)
-tests/              # config, DB, ingest, listener and Amazon tests
+tests/              # config, DB, ingest, filters, listener and Amazon tests
 ```
 
 ## Listener behavior (Phase 2)
@@ -124,11 +125,37 @@ tests/              # config, DB, ingest, listener and Amazon tests
   non-zero when any search failed, so cron/alerts can notice. `last_amazon_poll`
   is only updated when at least one search succeeded.
 
+## Filtering & dedupe (Phase 4)
+
+Every new offer — Telegram or Amazon — runs through `app/filters.py` before it
+can reach the broadcaster. Passing offers stay `status='pending'`, which is the
+auto-approved queue (Q5); failures are stored as `rejected` and the reason is
+logged.
+
+1. **Excluded keywords** — case-insensitive, Arabic-aware substring match on the
+   title (`EXCLUDE_KEYWORDS`).
+2. **Minimum discount** — applied only when a discount is known, so a Telegram
+   post without a parseable price is not discarded (`MIN_DISCOUNT_PCT`).
+3. **Near-duplicate** — compared with the last 500 accepted offers. A canonical
+   link match or a rapidfuzz title ratio at/above `FUZZY_THRESHOLD` (default 88)
+   is a duplicate only within the same currency and a ±10% price bucket. A
+   larger price drop on the same link therefore posts as a new deal.
+4. **Per-source cap** — at most `MAX_PER_SOURCE_PER_HOUR` accepted offers per
+   `source_channel` in the last hour (Amazon is one source).
+
+Rejected rows reserve their exact `content_hash`, so the same bad post is not
+re-ingested later. Offline checks of the rules need no `.env`:
+
+```powershell
+pytest tests/test_filters.py
+```
+
 ## Data model (schema v2)
 
 - `offers` — one row per unique deal; `content_hash` is the exact-dupe guard.
-  `status` is `pending` → `posted`, or `rejected`. `image_path` points at a
-  downloaded Telegram photo; `image_url` is for remote (Amazon) images.
+  `status` is `pending` (auto-approved queue) → `posted`, or `rejected` with the
+  filter reason in the log. `image_path` points at a downloaded Telegram photo;
+  `image_url` is for remote (Amazon) images.
 - `post_deliveries` — one row per (offer, channel), so multi-channel fan-out
   can be tracked, retried and rate-limited per channel.
 - `state` — small key/value store: `schema_version`, `paused`,
@@ -152,7 +179,7 @@ All timestamps are UTC in `YYYY-MM-DDTHH:MM:SSZ` form, which sorts correctly as 
 - `MAX_POSTS_PER_HOUR` per channel, `POST_INTERVAL_SECONDS` between posts
 - `MAX_PER_SOURCE_PER_HOUR` so one source cannot dominate the feed
 - `MIN_DISCOUNT_PCT` and `EXCLUDE_KEYWORDS` quality gate
-- `FUZZY_THRESHOLD` for near-duplicate titles
+- `FUZZY_THRESHOLD` for near-duplicate titles within ±10% price buckets
 - `AMAZON_MIN_DISCOUNT_PCT` when the Amazon poller is enabled (also sent to
   the API so quota is not spent on non-deals)
 

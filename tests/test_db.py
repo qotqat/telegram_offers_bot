@@ -87,6 +87,19 @@ def test_recent_offers_newest_first(conn) -> None:
     assert [offer.title for offer in recent] == ["Deal 2", "Deal 1"]
 
 
+def test_recent_offers_can_exclude_rejected(conn) -> None:
+    accepted = db.insert_offer(conn, make_offer())
+    rejected = db.insert_offer(
+        conn, make_offer(content_hash="hash-2", source_msg_id=2)
+    )
+    db.mark_offer_rejected(conn, rejected)
+
+    assert [offer.id for offer in db.recent_offers(conn)] == [rejected, accepted]
+    assert [
+        offer.id for offer in db.recent_offers(conn, include_rejected=False)
+    ] == [accepted]
+
+
 def test_mark_posted_and_rejected(conn) -> None:
     offer_id = db.insert_offer(conn, make_offer())
     db.mark_offer_posted(conn, offer_id)

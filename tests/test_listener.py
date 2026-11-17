@@ -162,3 +162,63 @@ def test_process_message_without_link_is_skipped(conn, config) -> None:
         )
         is None
     )
+
+
+def test_process_message_rejects_low_discount_without_downloading(
+    conn, config
+) -> None:
+    message = fake_message(
+        msg_id=201,
+        text=(
+            "Weak deal\n"
+            "Price: $100 was $105\n"
+            "https://shop.example.com/weak"
+        ),
+        photo=True,
+        file_size=1024,
+    )
+    client = FakeClient()
+
+    offer_id = asyncio.run(
+        process_message(client, message, "@chan", conn=conn, config=config)
+    )
+
+    assert offer_id is None
+    assert client.downloads == 0
+    row = conn.execute("SELECT status FROM offers").fetchone()
+    assert row["status"] == "rejected"
+
+
+def test_process_message_rejects_near_duplicate(conn, config) -> None:
+    client = FakeClient()
+    first = fake_message(
+        msg_id=301,
+        text=(
+            "Sony WH-1000XM5 Headphones\n"
+            "Price: $299 was $399\n"
+            "https://shop.example.com/a"
+        ),
+    )
+    repost = fake_message(
+        msg_id=302,
+        text=(
+            "Sony WH-1000XM5 Headphones!\n"
+            "Price: $305\n"
+            "https://other.example.com/b"
+        ),
+    )
+
+    first_id = asyncio.run(
+        process_message(client, first, "@chan", conn=conn, config=config)
+    )
+    duplicate_id = asyncio.run(
+        process_message(client, repost, "@chan", conn=conn, config=config)
+    )
+
+    assert first_id is not None
+    assert duplicate_id is None
+    statuses = [
+        row["status"]
+        for row in conn.execute("SELECT status FROM offers ORDER BY id")
+    ]
+    assert statuses == ["pending", "rejected"]

@@ -64,8 +64,8 @@ def main(argv: list[str] | None = None) -> int:
             )
             image = "img" if row["image_path"] or row["image_url"] else "   "
             print(
-                f"#{row['id']:<4} {row['created_at']}  {discount:>6}  "
-                f"{price:>9} {row['currency'] or '':<4} {image}  "
+                f"#{row['id']:<4} {row['created_at']}  {row['status']:<8}  "
+                f"{discount:>6}  {price:>9} {row['currency'] or '':<4} {image}  "
                 f"[{row['source_channel'] or '-'}] {row['title'][:70]}"
             )
         print(f"\n{len(rows)} offer(s)")

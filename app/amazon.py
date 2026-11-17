@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Mapping, Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from . import db
+from . import db, filters
 from .config import AMAZON_CREDENTIAL_VERSIONS, Config
 from .ingest import make_content_hash
 from .models import SOURCE_AMAZON, Offer
@@ -429,6 +429,7 @@ class PollResult:
     skipped: int = 0
     stored: int = 0
     duplicates: int = 0
+    rejected: int = 0
     errors: list[str] = field(default_factory=list)
 
 
@@ -510,10 +511,17 @@ def poll(
         errors=list(collection.errors),
     )
     for offer in collection.offers:
-        offer_id = db.insert_offer(conn, offer)
+        decision = filters.evaluate_offer(conn, offer, config)
+        offer_id = filters.save_offer(conn, offer, decision)
         if offer_id is None:
             result.duplicates += 1
             log.info("amazon duplicate skipped: %s", offer.title)
+            continue
+        if not decision.accepted:
+            result.rejected += 1
+            log.info(
+                "amazon offer #%d rejected: %s", offer_id, decision.detail
+            )
             continue
         result.stored += 1
         log.info(
@@ -544,11 +552,13 @@ def run_forever(config: Config, conn=None) -> None:
                     result = poll(config, connection)
                     log.info(
                         "amazon poll: %d search(es), %d item(s), %d new, "
-                        "%d duplicate(s), %d skipped, %d error(s)",
+                        "%d duplicate(s), %d filtered, %d skipped, "
+                        "%d error(s)",
                         result.searches,
                         result.items,
                         result.stored,
                         result.duplicates,
+                        result.rejected,
                         result.skipped,
                         len(result.errors),
                     )

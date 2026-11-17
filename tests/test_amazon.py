@@ -412,6 +412,23 @@ def test_poll_counts_low_discount_items_as_skipped(tmp_path) -> None:
         conn.close()
 
 
+def test_poll_applies_filters_and_counts_rejections(tmp_path) -> None:
+    config = make_config(tmp_path, exclude_keywords=["sony"])
+    transport = FakeTransport([token_ok(), search_ok([make_item()])])
+    client = CreatorsClient("cred-id", "cred-secret", "tag-20", transport=transport)
+    conn = db.init_db(tmp_path / "offers.db")
+    try:
+        result = poll(config, conn, client=client)
+
+        assert result.stored == 0
+        assert result.rejected == 1
+        assert result.duplicates == 0
+        stored = db.recent_offers(conn)[0]
+        assert stored.status == "rejected"
+    finally:
+        conn.close()
+
+
 def test_collect_offers_pauses_between_keywords(tmp_path) -> None:
     config = make_config(
         tmp_path,
