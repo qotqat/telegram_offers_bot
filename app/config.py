@@ -14,6 +14,14 @@ CHANNEL_MODE_ROUTE = "route"
 
 VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 
+# Creators API OAuth hosts. The credential version is printed on the
+# credential CSV downloaded from Associates Central.
+AMAZON_CREDENTIAL_VERSIONS = {
+    "3.1": "https://api.amazon.com/auth/o2/token",  # North America
+    "3.2": "https://api.amazon.co.uk/auth/o2/token",  # Europe
+    "3.3": "https://api.amazon.co.jp/auth/o2/token",  # Far East
+}
+
 
 class ConfigError(Exception):
     """Raised when `.env` is missing required or valid values."""
@@ -44,6 +52,7 @@ def _parse_int(
     default: Optional[int],
     errors: list[str],
     minimum: Optional[int] = None,
+    maximum: Optional[int] = None,
 ) -> Optional[int]:
     if raw is None or raw.strip() == "":
         return default
@@ -54,6 +63,8 @@ def _parse_int(
         return default
     if minimum is not None and value < minimum:
         errors.append(f"{name} must be >= {minimum}, got {value}")
+    if maximum is not None and value > maximum:
+        errors.append(f"{name} must be <= {maximum}, got {value}")
     return value
 
 
@@ -117,8 +128,13 @@ class Config:
     amazon_enabled: bool = False
     amazon_credential_id: Optional[str] = None
     amazon_credential_secret: Optional[str] = None
+    amazon_credential_version: str = "3.1"
     amazon_associate_tag: Optional[str] = None
-    amazon_region: str = "US"
+    amazon_marketplace: str = "www.amazon.com"
+    amazon_keywords: list[str] = field(default_factory=list)
+    amazon_item_count: int = 10
+    amazon_min_discount_pct: float = 20.0
+    amazon_request_delay_seconds: float = 1.0
     amazon_poll_interval_minutes: int = 30
 
     # Storage / logging
@@ -276,6 +292,41 @@ class Config:
         amazon_id = get("AMAZON_CREDENTIAL_ID")
         amazon_secret = get("AMAZON_CREDENTIAL_SECRET")
         amazon_tag = get("AMAZON_ASSOCIATE_TAG")
+        amazon_version = get("AMAZON_CREDENTIAL_VERSION") or "3.1"
+        amazon_marketplace = (
+            (get("AMAZON_MARKETPLACE") or "www.amazon.com")
+            .lower()
+            .removeprefix("https://")
+            .removeprefix("http://")
+            .rstrip("/")
+        )
+        amazon_keywords: list[str] = []
+        for keyword in _split_csv(get("AMAZON_KEYWORDS")):
+            if keyword.lower() not in {item.lower() for item in amazon_keywords}:
+                amazon_keywords.append(keyword)
+        amazon_item_count = _parse_int(
+            get("AMAZON_ITEM_COUNT"),
+            name="AMAZON_ITEM_COUNT",
+            default=10,
+            errors=errors,
+            minimum=1,
+            maximum=10,
+        )
+        amazon_min_discount = _parse_float(
+            get("AMAZON_MIN_DISCOUNT_PCT"),
+            name="AMAZON_MIN_DISCOUNT_PCT",
+            default=20.0,
+            errors=errors,
+            minimum=0,
+            maximum=100,
+        )
+        amazon_request_delay = _parse_float(
+            get("AMAZON_REQUEST_DELAY_SECONDS"),
+            name="AMAZON_REQUEST_DELAY_SECONDS",
+            default=1.0,
+            errors=errors,
+            minimum=0,
+        )
         if amazon_enabled:
             missing = [
                 name
@@ -289,6 +340,19 @@ class Config:
             if missing:
                 errors.append(
                     "AMAZON_ENABLED=1 but missing: " + ", ".join(missing)
+                )
+            if not amazon_keywords:
+                errors.append("AMAZON_ENABLED=1 but AMAZON_KEYWORDS is empty")
+            if amazon_version not in AMAZON_CREDENTIAL_VERSIONS:
+                errors.append(
+                    "AMAZON_CREDENTIAL_VERSION must be one of "
+                    f"{', '.join(sorted(AMAZON_CREDENTIAL_VERSIONS))}, got "
+                    f"{amazon_version!r} (regenerate credentials if you only have 2.x)"
+                )
+            if "/" in amazon_marketplace:
+                errors.append(
+                    "AMAZON_MARKETPLACE must be a host like www.amazon.com, "
+                    f"got {amazon_marketplace!r}"
                 )
 
         cfg = cls(
@@ -314,8 +378,13 @@ class Config:
             amazon_enabled=amazon_enabled,
             amazon_credential_id=amazon_id,
             amazon_credential_secret=amazon_secret,
+            amazon_credential_version=amazon_version,
             amazon_associate_tag=amazon_tag,
-            amazon_region=(get("AMAZON_REGION") or "US").upper(),
+            amazon_marketplace=amazon_marketplace,
+            amazon_keywords=amazon_keywords,
+            amazon_item_count=amazon_item_count or 10,
+            amazon_min_discount_pct=amazon_min_discount,
+            amazon_request_delay_seconds=amazon_request_delay,
             amazon_poll_interval_minutes=_parse_int(
                 get("AMAZON_POLL_INTERVAL_MINUTES"),
                 name="AMAZON_POLL_INTERVAL_MINUTES",
@@ -371,6 +440,7 @@ class Config:
                 ("AMAZON_CREDENTIAL_ID", self.amazon_credential_id),
                 ("AMAZON_CREDENTIAL_SECRET", self.amazon_credential_secret),
                 ("AMAZON_ASSOCIATE_TAG", self.amazon_associate_tag),
+                ("AMAZON_KEYWORDS", self.amazon_keywords),
             )
         )
 
@@ -382,6 +452,7 @@ class Config:
             and self.amazon_credential_id
             and self.amazon_credential_secret
             and self.amazon_associate_tag
+            and self.amazon_keywords
         )
 
     def account_checklist(self) -> list[tuple[str, bool, str]]:
@@ -415,6 +486,7 @@ class Config:
             (
                 "Amazon Creators API",
                 self.amazon_ready,
-                "optional for launch (AMAZON_ENABLED=0 = Telegram-only)",
+                "optional for launch (AMAZON_ENABLED=0 = Telegram-only); "
+                "Credential ID + Secret + version 3.x + tag + keywords",
             ),
         ]

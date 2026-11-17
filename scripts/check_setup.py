@@ -26,7 +26,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if not Path(args.env).is_file():
-        print(f"[MISS] {args.env} not found — copy .env.example to .env first")
+        print(f"[MISS] {args.env} not found - copy .env.example to .env first")
         print("\nNothing else can be checked until the config file exists.")
         return 2
 
@@ -77,7 +77,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if cfg.amazon_enabled:
         if cfg.amazon_ready:
-            print(f"{_mark(True)} amazon poller (enabled)")
+            print(
+                f"{_mark(True)} amazon poller (enabled: credential "
+                f"v{cfg.amazon_credential_version}, {cfg.amazon_marketplace}, "
+                f"{len(cfg.amazon_keywords)} keyword(s))"
+            )
         else:
             problems += 1
             print(f"{_mark(False)} amazon poller: credentials incomplete")
@@ -89,13 +93,21 @@ def main(argv: list[str] | None = None) -> int:
     if session_file.exists():
         print(f"[OK]   listener session present ({session_file})")
     else:
-        print("[INFO] no listener session yet — the first `python listener.py` asks for phone/code")
+        print("[INFO] no listener session yet - the first `python listener.py` asks for phone/code")
 
     print("\n== Summary ==")
     if problems:
-        print(f"{problems} blocking problem(s) — fix the [MISS] items above.")
+        print(f"{problems} blocking problem(s) - fix the [MISS] items above.")
         return 2
-    print("Core pipeline configuration is ready. Next: `python listener.py --once`.")
+    if cfg.amazon_enabled:
+        print(
+            "Configuration ready. Next: `python amazon_poller.py --dry-run` "
+            "(Amazon), then `python listener.py --once`."
+        )
+    else:
+        print(
+            "Core pipeline configuration is ready. Next: `python listener.py --once`."
+        )
     return 0
 
 

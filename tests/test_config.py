@@ -106,14 +106,66 @@ def test_amazon_enabled_without_credentials_is_an_error() -> None:
 
 
 def test_amazon_ready_when_fully_configured() -> None:
+    cfg = Config.load(env=base_env(**amazon_env()))
+    assert cfg.amazon_ready is True
+
+
+def amazon_env(**overrides: str) -> dict[str, str]:
+    env = {
+        "AMAZON_ENABLED": "1",
+        "AMAZON_CREDENTIAL_ID": "amzn1.cred",
+        "AMAZON_CREDENTIAL_SECRET": "secret",
+        "AMAZON_CREDENTIAL_VERSION": "3.1",
+        "AMAZON_ASSOCIATE_TAG": "tag-20",
+        "AMAZON_KEYWORDS": "headphones,air fryer",
+    }
+    env.update(overrides)
+    return env
+
+
+def test_amazon_enabled_without_keywords_is_an_error() -> None:
+    with pytest.raises(ConfigError, match="AMAZON_KEYWORDS"):
+        Config.load(env=base_env(**amazon_env(AMAZON_KEYWORDS="")))
+
+
+def test_amazon_credential_version_is_validated() -> None:
+    with pytest.raises(ConfigError, match="AMAZON_CREDENTIAL_VERSION"):
+        Config.load(env=base_env(**amazon_env(AMAZON_CREDENTIAL_VERSION="2.1")))
+
+
+@pytest.mark.parametrize("count", ["0", "11", "abc"])
+def test_amazon_item_count_is_bounded(count: str) -> None:
+    with pytest.raises(ConfigError, match="AMAZON_ITEM_COUNT"):
+        Config.load(env=base_env(**amazon_env(AMAZON_ITEM_COUNT=count)))
+
+
+def test_amazon_marketplace_must_be_a_host() -> None:
+    with pytest.raises(ConfigError, match="AMAZON_MARKETPLACE"):
+        Config.load(
+            env=base_env(**amazon_env(AMAZON_MARKETPLACE="www.amazon.com/gp"))
+        )
+
+
+def test_amazon_options_parse() -> None:
     cfg = Config.load(
         env=base_env(
-            AMAZON_ENABLED="true",
-            AMAZON_CREDENTIAL_ID="amzn1.cred",
-            AMAZON_CREDENTIAL_SECRET="secret",
-            AMAZON_ASSOCIATE_TAG="tag-20",
+            **amazon_env(
+                AMAZON_KEYWORDS="Headphones, smart watch,headphones",
+                AMAZON_MARKETPLACE="https://www.amazon.co.uk/",
+                AMAZON_ITEM_COUNT="5",
+                AMAZON_MIN_DISCOUNT_PCT="35",
+                AMAZON_REQUEST_DELAY_SECONDS="0.25",
+                AMAZON_POLL_INTERVAL_MINUTES="45",
+            )
         )
     )
+
+    assert cfg.amazon_keywords == ["Headphones", "smart watch"]
+    assert cfg.amazon_marketplace == "www.amazon.co.uk"
+    assert cfg.amazon_item_count == 5
+    assert cfg.amazon_min_discount_pct == 35
+    assert cfg.amazon_request_delay_seconds == 0.25
+    assert cfg.amazon_poll_interval_minutes == 45
     assert cfg.amazon_ready is True
 
 
