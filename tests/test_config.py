@@ -156,3 +156,29 @@ def test_loads_from_dotenv_file(tmp_path, monkeypatch) -> None:
     cfg = Config.load(env_file)
     assert cfg.target_channels == ["@deals_en", "@deals_ar"]
     assert cfg.owner_id == 42
+
+
+def test_listener_defaults_and_overrides() -> None:
+    defaults = Config.load(env=base_env())
+    assert defaults.catchup_limit == 50
+    assert defaults.catchup_delay_seconds == 1.0
+    assert defaults.max_image_bytes == 1024 * 1024
+    assert str(defaults.media_dir).endswith("media")
+
+    custom = Config.load(
+        env=base_env(
+            CATCHUP_LIMIT="10",
+            CATCHUP_DELAY_SECONDS="0.5",
+            MAX_IMAGE_BYTES="204800",
+            MEDIA_DIR="data/pics",
+        )
+    )
+    assert custom.catchup_limit == 10
+    assert custom.catchup_delay_seconds == 0.5
+    assert custom.max_image_bytes == 204800
+    assert str(custom.media_dir).endswith("pics")
+
+
+def test_max_image_bytes_has_sane_minimum() -> None:
+    with pytest.raises(ConfigError, match="MAX_IMAGE_BYTES"):
+        Config.load(env=base_env(MAX_IMAGE_BYTES="100"))

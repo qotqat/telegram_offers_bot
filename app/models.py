@@ -64,6 +64,7 @@ class StoredOffer:
     status: str = STATUS_PENDING
     created_at: Optional[str] = None
     posted_at: Optional[str] = None
+    image_path: Optional[str] = None
 
 
 @dataclass(slots=True)

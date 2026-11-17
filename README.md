@@ -9,8 +9,8 @@ channels run by a single bot.
 | Phase | Scope | Status |
 |---|---|---|
 | **1. Foundations** | Skeleton, `.env` config + validation, SQLite schema/access layer, self-check tooling, tests | ✅ done |
-| **2. Telegram listener** | Telethon session, 10 sources, live + 50-msg catch-up, media capture, normalize + hash insert | next |
-| **3. Amazon ingestion** | Creators API (Branch A) or stubbed module behind `AMAZON_ENABLED` (Branch B) | pending |
+| **2. Telegram listener** | Telethon session, 10 sources, live + 50-msg catch-up, media capture, normalize + hash insert | ✅ done |
+| **3. Amazon ingestion** | Creators API (Branch A) or stubbed module behind `AMAZON_ENABLED` (Branch B) | next |
 | **4. Filters & dedupe** | rapidfuzz near-dup, discount/keyword/source-cap filters, auto-approve | pending |
 | **5. Broadcaster** | `all` / `route` fan-out, AR/EN templates, buttons, rate limits, per-channel error isolation | pending |
 | **6. Admin & hardening** | `/pause` `/resume` `/stats`, crash alerts, rotating logs, graceful shutdown | pending |
@@ -36,6 +36,19 @@ python -m scripts.init_db
 pytest
 ```
 
+### First listener run
+
+```powershell
+python listener.py --once          # catch-up only, then exit
+python -m scripts.list_offers      # verify offers landed in SQLite
+python listener.py                 # catch-up + live listening
+```
+
+The first run asks for the **listener account's** phone number and login code
+(and 2FA password if set). That account must already be a member of every
+channel in `SOURCE_CHANNELS`; join them manually before starting. The session
+file (`TG_SESSION_PATH`) persists, so later runs are non-interactive.
+
 `check_setup` prints a per-account checklist plus config warnings and exits
 non-zero while a required value is missing. `init_db` creates the schema and is
 safe to re-run.
@@ -45,20 +58,43 @@ safe to re-run.
 ```
 app/
   config.py         # .env parsing + validation (single source of truth)
-  db.py             # SQLite (WAL) schema and access layer
+  db.py             # SQLite (WAL) schema, migrations and access layer
+  ingest.py         # post -> Offer: link pick, price/discount parsing, hash
+  listener.py       # Telethon catch-up + live message ingestion
   models.py         # Offer / StoredOffer / Delivery / Stats
   utils.py          # UTC timestamps, hashing, Arabic detection
   logging_setup.py  # rotating file + UTF-8 console logging
+listener.py         # listener process entry point
 scripts/
   check_setup.py    # kickoff self-check
   init_db.py        # schema creation / verification
-tests/              # config, DB and utils tests
+  list_offers.py    # inspect recent rows (M1 check)
+tests/              # config, DB, ingest and listener tests
 ```
 
-## Data model (schema v1)
+## Listener behavior (Phase 2)
+
+- On start it reads the last `CATCHUP_LIMIT` (default 50) messages per source,
+  oldest first, then keeps listening for new posts.
+- Messages are normalized: the best link is picked (product shops win over
+  social links; channel invites are ignored), the first meaningful line becomes
+  the title, and `$`, `€`, `£`, `ر.س`, `د.إ`, `ج.م`, `د.ك`, `ر.ق` prices are
+  parsed (including Arabic-Indic digits and `1.299,00` formats).
+- Exact dedupe uses `content_hash` = normalized title + canonical link +
+  price. Tracking parameters (`utm_*`, `tag=`, Amazon `/ref=`) are stripped
+  before hashing, so the same deal with a different affiliate tag collapses.
+- Messages already ingested (`source_channel` + `source_msg_id`) are skipped
+  cheaply, so restarts do not re-download media.
+- Photos are downloaded to `MEDIA_DIR` (default `data/media`) when ≤
+  `MAX_IMAGE_BYTES` (default 1 MB); larger images are skipped and the offer is
+  stored text-only. Downloads never crash ingestion.
+- `--once`, `--no-catchup` and `--limit N` support quick tests.
+
+## Data model (schema v2)
 
 - `offers` — one row per unique deal; `content_hash` is the exact-dupe guard.
-  `status` is `pending` → `posted`, or `rejected`.
+  `status` is `pending` → `posted`, or `rejected`. `image_path` points at a
+  downloaded Telegram photo; `image_url` is for remote (Amazon) images.
 - `post_deliveries` — one row per (offer, channel), so multi-channel fan-out
   can be tracked, retried and rate-limited per channel.
 - `state` — small key/value store: `schema_version`, `paused`,

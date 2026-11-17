@@ -99,6 +99,12 @@ class Config:
     # Source channels
     source_channels: list[str] = field(default_factory=list)
 
+    # Listener behavior
+    catchup_limit: int = 50
+    catchup_delay_seconds: float = 1.0
+    media_dir: Path = Path("data/media")
+    max_image_bytes: int = 1024 * 1024
+
     # Filters / queue
     min_discount_pct: float = 20.0
     exclude_keywords: list[str] = field(default_factory=list)
@@ -184,6 +190,28 @@ class Config:
                 f"SOURCE_CHANNELS has {len(source_channels)} entries; the launch plan "
                 "expects exactly 10"
             )
+
+        catchup_limit = _parse_int(
+            get("CATCHUP_LIMIT"),
+            name="CATCHUP_LIMIT",
+            default=50,
+            errors=errors,
+            minimum=0,
+        )
+        catchup_delay = _parse_float(
+            get("CATCHUP_DELAY_SECONDS"),
+            name="CATCHUP_DELAY_SECONDS",
+            default=1.0,
+            errors=errors,
+            minimum=0,
+        )
+        max_image_bytes = _parse_int(
+            get("MAX_IMAGE_BYTES"),
+            name="MAX_IMAGE_BYTES",
+            default=1024 * 1024,
+            errors=errors,
+            minimum=10 * 1024,
+        )
 
         if channel_mode == CHANNEL_MODE_ROUTE:
             if not route_rules:
@@ -273,6 +301,10 @@ class Config:
             channel_mode=channel_mode,
             route_rules=route_rules,
             source_channels=source_channels,
+            catchup_limit=catchup_limit if catchup_limit is not None else 50,
+            catchup_delay_seconds=catchup_delay,
+            media_dir=Path(get("MEDIA_DIR") or "data/media"),
+            max_image_bytes=max_image_bytes or 1024 * 1024,
             min_discount_pct=min_discount,
             exclude_keywords=exclude_keywords,
             post_interval_seconds=post_interval or 360,

@@ -172,3 +172,71 @@ def test_offer_validation() -> None:
         make_offer(link="")
     with pytest.raises(ValueError, match="source_type"):
         make_offer(source_type="twitter")
+
+
+def test_image_path_roundtrip_and_source_lookup(conn) -> None:
+    offer_id = db.insert_offer(
+        conn, make_offer(image_path="data/media/hash-1.jpg")
+    )
+    stored = db.get_offer(conn, offer_id)
+    assert stored.image_path == "data/media/hash-1.jpg"
+    assert db.offer_exists_by_source(conn, "@chan1", 10) is True
+    assert db.offer_exists_by_source(conn, "@chan1", 11) is False
+
+
+def test_migrates_v1_database(tmp_path) -> None:
+    import sqlite3
+
+    path = tmp_path / "v1.db"
+    raw = sqlite3.connect(path)
+    raw.executescript(
+        """
+        CREATE TABLE offers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            price REAL, old_price REAL, discount_pct REAL,
+            currency TEXT DEFAULT 'USD',
+            link TEXT NOT NULL,
+            image_url TEXT,
+            category TEXT,
+            source_type TEXT NOT NULL,
+            source_channel TEXT, source_msg_id INTEGER,
+            content_hash TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT NOT NULL,
+            posted_at TEXT
+        );
+        CREATE TABLE state (key TEXT PRIMARY KEY, value TEXT);
+        INSERT INTO state VALUES ('schema_version', '1');
+        INSERT INTO offers (title, link, source_type, content_hash, created_at)
+        VALUES ('Old offer', 'https://example.com/old', 'telegram', 'old-hash',
+                '2026-01-01T00:00:00Z');
+        """
+    )
+    raw.commit()
+    raw.close()
+
+    migrated = db.init_db(path)
+    try:
+        assert db.schema_version(migrated) == db.SCHEMA_VERSION
+        columns = {
+            row["name"] for row in migrated.execute("PRAGMA table_info(offers)")
+        }
+        assert "image_path" in columns
+        assert migrated.execute("SELECT COUNT(*) FROM offers").fetchone()[0] == 1
+    finally:
+        migrated.close()
+
+
+def test_refuses_newer_schema(tmp_path) -> None:
+    import sqlite3
+
+    path = tmp_path / "newer.db"
+    raw = sqlite3.connect(path)
+    raw.executescript("CREATE TABLE state (key TEXT PRIMARY KEY, value TEXT);")
+    raw.execute("INSERT INTO state VALUES ('schema_version', '999')")
+    raw.commit()
+    raw.close()
+
+    with pytest.raises(RuntimeError, match="newer than this code"):
+        db.init_db(path)

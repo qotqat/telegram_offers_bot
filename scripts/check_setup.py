@@ -10,7 +10,6 @@ Exit code 2 means something required is missing or invalid.
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 
 from app import db
@@ -85,11 +84,18 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print("[SKIP] amazon poller (AMAZON_ENABLED=0, Telegram-only launch)")
 
+    print("\n== Session ==")
+    session_file = Path(str(cfg.tg_session_path) + ".session")
+    if session_file.exists():
+        print(f"[OK]   listener session present ({session_file})")
+    else:
+        print("[INFO] no listener session yet — the first `python listener.py` asks for phone/code")
+
     print("\n== Summary ==")
     if problems:
         print(f"{problems} blocking problem(s) — fix the [MISS] items above.")
         return 2
-    print("Core pipeline configuration is ready. Next: Phase 2 (Telegram listener).")
+    print("Core pipeline configuration is ready. Next: `python listener.py --once`.")
     return 0
 
 

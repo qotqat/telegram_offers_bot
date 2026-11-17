@@ -8,7 +8,6 @@ timeout keeps short write bursts from raising "database is locked".
 from __future__ import annotations
 
 import sqlite3
-from contextlib import closing
 from pathlib import Path
 from typing import Optional
 
@@ -22,7 +21,7 @@ from .models import (
 )
 from .utils import utc_day_start_iso
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS offers (
@@ -34,6 +33,7 @@ CREATE TABLE IF NOT EXISTS offers (
     currency TEXT DEFAULT 'USD',
     link TEXT NOT NULL,
     image_url TEXT,
+    image_path TEXT,
     category TEXT,
     source_type TEXT NOT NULL,              -- 'amazon' | 'telegram'
     source_channel TEXT,
@@ -73,6 +73,13 @@ CREATE TABLE IF NOT EXISTS state (
 
 _SCHEMA_OBJECTS = ("offers", "post_deliveries", "state")
 
+# Forward-only migrations, keyed by the version they produce. New installs get
+# the full schema above, so migrations only run on databases created by older
+# code.
+_MIGRATIONS: dict[int, list[str]] = {
+    2: ["ALTER TABLE offers ADD COLUMN image_path TEXT"],
+}
+
 _DEFAULTS = {
     "paused": "0",
     "last_amazon_poll": "",
@@ -93,7 +100,7 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
 
 
 def init_db(db_path_or_conn: str | Path | sqlite3.Connection) -> sqlite3.Connection:
-    """Create schema if missing and record the schema version (idempotent)."""
+    """Create schema if missing and apply pending migrations (idempotent)."""
     if isinstance(db_path_or_conn, sqlite3.Connection):
         conn = db_path_or_conn
     else:
@@ -108,16 +115,26 @@ def init_db(db_path_or_conn: str | Path | sqlite3.Connection) -> sqlite3.Connect
         current = get_state(conn, "schema_version")
         if current is None:
             set_state(conn, "schema_version", str(SCHEMA_VERSION))
-        elif int(current) > SCHEMA_VERSION:
-            raise RuntimeError(
-                f"database schema v{current} is newer than this code (v{SCHEMA_VERSION})"
-            )
-        elif int(current) < SCHEMA_VERSION:
-            raise RuntimeError(
-                f"database schema v{current} needs migration to v{SCHEMA_VERSION}; "
-                "no migration path is implemented yet"
-            )
+        else:
+            version = int(current)
+            if version > SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"database schema v{version} is newer than this code (v{SCHEMA_VERSION})"
+                )
+            for target in range(version + 1, SCHEMA_VERSION + 1):
+                for statement in _MIGRATIONS.get(target, []):
+                    _apply_migration(conn, statement)
+                set_state(conn, "schema_version", str(target))
     return conn
+
+
+def _apply_migration(conn: sqlite3.Connection, statement: str) -> None:
+    """Run one migration statement, tolerating an already-applied column add."""
+    try:
+        conn.execute(statement)
+    except sqlite3.OperationalError as exc:
+        if "duplicate column name" not in str(exc).lower():
+            raise
 
 
 def schema_version(conn: sqlite3.Connection) -> int:
@@ -133,8 +150,9 @@ def insert_offer(conn: sqlite3.Connection, offer: Offer) -> Optional[int]:
             """
             INSERT INTO offers (
                 title, price, old_price, discount_pct, currency, link, image_url,
-                category, source_type, source_channel, source_msg_id, content_hash
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                image_path, category, source_type, source_channel, source_msg_id,
+                content_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(content_hash) DO NOTHING
             """,
             (
@@ -145,6 +163,7 @@ def insert_offer(conn: sqlite3.Connection, offer: Offer) -> Optional[int]:
                 offer.currency,
                 offer.link,
                 offer.image_url,
+                offer.image_path,
                 offer.category,
                 offer.source_type,
                 offer.source_channel,
@@ -160,6 +179,17 @@ def insert_offer(conn: sqlite3.Connection, offer: Offer) -> Optional[int]:
 def get_offer(conn: sqlite3.Connection, offer_id: int) -> Optional[StoredOffer]:
     row = conn.execute("SELECT * FROM offers WHERE id = ?", (offer_id,)).fetchone()
     return _row_to_offer(row) if row else None
+
+
+def offer_exists_by_source(
+    conn: sqlite3.Connection, source_channel: str, source_msg_id: int
+) -> bool:
+    """Cheap re-run guard: catch-up must not re-process known messages."""
+    row = conn.execute(
+        "SELECT 1 FROM offers WHERE source_channel = ? AND source_msg_id = ? LIMIT 1",
+        (source_channel, source_msg_id),
+    ).fetchone()
+    return row is not None
 
 
 def recent_offers(conn: sqlite3.Connection, limit: int = 500) -> list[StoredOffer]:
@@ -366,6 +396,7 @@ def _row_to_offer(row: sqlite3.Row) -> StoredOffer:
         discount_pct=data["discount_pct"],
         currency=data["currency"],
         image_url=data["image_url"],
+        image_path=data["image_path"],
         category=data["category"],
         source_channel=data["source_channel"],
         source_msg_id=data["source_msg_id"],
@@ -390,6 +421,7 @@ __all__ = [
     "schema_version",
     "insert_offer",
     "get_offer",
+    "offer_exists_by_source",
     "recent_offers",
     "mark_offer_posted",
     "mark_offer_rejected",
