@@ -14,6 +14,7 @@ regenerated in Associates Central.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -27,6 +28,7 @@ from . import db, filters
 from .config import AMAZON_CREDENTIAL_VERSIONS, Config
 from .ingest import make_content_hash
 from .models import SOURCE_AMAZON, Offer
+from .runtime import notify_error
 from .utils import now_iso
 
 log = logging.getLogger(__name__)
@@ -562,8 +564,9 @@ def run_forever(config: Config, conn=None) -> None:
                         result.skipped,
                         len(result.errors),
                     )
-                except Exception:  # noqa: BLE001 - keep the poller alive
+                except Exception as exc:  # noqa: BLE001 - keep the poller alive
                     log.exception("amazon poll failed")
+                    asyncio.run(notify_error(config, "amazon", exc))
             time.sleep(max(60, config.amazon_poll_interval_minutes * 60))
     finally:
         if own_conn:

@@ -367,25 +367,53 @@ def _clean_title_line(line: str) -> str:
     return line
 
 
-def extract_title(text: str, urls: Iterable[str] = ()) -> str:
-    cleaned = normalize_digits(text)
-    for url in urls:
-        if url:
-            cleaned = cleaned.replace(url, " ")
-    cleaned = _URL_IN_TEXT_RE.sub(" ", cleaned)
-
-    for raw_line in cleaned.splitlines():
-        line = _clean_title_line(raw_line)
+def _title_lines(text: str, urls: Iterable[str] = ()):
+    url_list = list(urls)
+    for index, raw_line in enumerate((text or "").splitlines()):
+        cleaned = normalize_digits(raw_line)
+        for url in url_list:
+            if url:
+                cleaned = cleaned.replace(url, " ")
+        line = _clean_title_line(_URL_IN_TEXT_RE.sub(" ", cleaned))
         if len(line) < 3:
             continue
-        # Skip lines that are only a price (with or without currency).
         without_currency = _CURRENCY_RE.sub(" ", line).strip()
         if _NUMBER_RE.fullmatch(without_currency) or _NUMBER_RE.fullmatch(line):
             continue
         if len(re.sub(r"[\W_]+", "", line)) < 2:
             continue
+        yield index, line
+
+
+def extract_title(text: str, urls: Iterable[str] = ()) -> str:
+    for _, line in _title_lines(text, urls):
         return _truncate(line, 180)
     raise BuildFailure("no usable title")
+
+
+def replace_title(text: str, title: str, urls: Iterable[str] = ()) -> str:
+    """Replace the source headline, preserving separate price and body lines."""
+    lines = (text or "").splitlines()
+    for index, headline in _title_lines(text, urls):
+        details = []
+        pricing = parse_pricing(headline)
+        if pricing.price is not None:
+            price_text = f"Price: {pricing.price:g} {pricing.currency}"
+            source_amounts = {parse_number(match.group(0)) for match in _NUMBER_RE.finditer(normalize_digits(headline))}
+            if pricing.old_price is not None and pricing.old_price in source_amounts:
+                price_text += f" (was {pricing.old_price:g} {pricing.currency})"
+            details.append(price_text)
+        discount = _DISCOUNT_RE.search(headline)
+        if discount:
+            details.append("Discount: " + discount.group(0))
+        coupon = re.search(
+            r"\b(?:coupon(?:\s+code)?|promo(?:\s+code)?|code)\b.*|(?:ب?كود|كوبون).*",
+            headline, re.IGNORECASE,
+        )
+        if coupon:
+            details.append(coupon.group(0).strip())
+        return "\n".join([title, *lines[:index], *details, *lines[index + 1:]]).strip()
+    return (title + "\n\n" + (text or "")).strip()
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -408,6 +436,7 @@ def build_offer(
     source_channel: str,
     source_msg_id: Optional[int],
     category: Optional[str] = None,
+    title: Optional[str] = None,
 ) -> Offer:
     """Build an Offer from a post or raise BuildFailure with the reason."""
     url_list = [url for url in urls if url]
@@ -418,7 +447,7 @@ def build_offer(
     if not link:
         raise BuildFailure("no usable deal link")
 
-    title = extract_title(text or "", url_list)
+    title = title if title is not None else extract_title(text or "", url_list)
     pricing = parse_pricing(text or "")
 
     return Offer(

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 from .models import (
     STATUS_PENDING,
@@ -21,7 +21,7 @@ from .models import (
 )
 from .utils import utc_day_start_iso
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS offers (
@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS offers (
     link TEXT NOT NULL,
     image_url TEXT,
     image_path TEXT,
+    post_text TEXT,
     category TEXT,
     source_type TEXT NOT NULL,              -- 'amazon' | 'telegram'
     source_channel TEXT,
@@ -78,6 +79,7 @@ _SCHEMA_OBJECTS = ("offers", "post_deliveries", "state")
 # code.
 _MIGRATIONS: dict[int, list[str]] = {
     2: ["ALTER TABLE offers ADD COLUMN image_path TEXT"],
+    3: ["ALTER TABLE offers ADD COLUMN post_text TEXT"],
 }
 
 _DEFAULTS = {
@@ -150,9 +152,9 @@ def insert_offer(conn: sqlite3.Connection, offer: Offer) -> Optional[int]:
             """
             INSERT INTO offers (
                 title, price, old_price, discount_pct, currency, link, image_url,
-                image_path, category, source_type, source_channel, source_msg_id,
-                content_hash
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                image_path, post_text, category, source_type, source_channel,
+                source_msg_id, content_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(content_hash) DO NOTHING
             """,
             (
@@ -164,6 +166,7 @@ def insert_offer(conn: sqlite3.Connection, offer: Offer) -> Optional[int]:
                 offer.link,
                 offer.image_url,
                 offer.image_path,
+                offer.post_text,
                 offer.category,
                 offer.source_type,
                 offer.source_channel,
@@ -310,6 +313,17 @@ def mark_delivery_failed(
         )
 
 
+def mark_delivery_skipped(
+    conn: sqlite3.Connection, delivery_id: int, reason: str
+) -> None:
+    """Mark a delivery as intentionally not sent (e.g. route mismatch)."""
+    with conn:
+        conn.execute(
+            "UPDATE post_deliveries SET status = 'skipped', error = ? WHERE id = ?",
+            (reason[:1000], delivery_id),
+        )
+
+
 def count_sent_since(
     conn: sqlite3.Connection, since_iso: str, *, channel: Optional[str] = None
 ) -> int:
@@ -321,14 +335,36 @@ def count_sent_since(
     return int(conn.execute(sql, params).fetchone()[0])
 
 
-def all_channels_delivered(conn: sqlite3.Connection, offer_id: int) -> bool:
-    """True when this offer has no pending/failed deliveries left."""
+def all_channels_delivered(
+    conn: sqlite3.Connection,
+    offer_id: int,
+    channels: Optional[Iterable[str]] = None,
+) -> bool:
+    """True when every expected channel has a sent/skipped delivery.
+
+    Passing ``channels`` is the safe form for fan-out: it also catches target
+    channels that do not yet have a delivery row. Without it, the legacy
+    behavior only checks existing rows.
+    """
+    if channels is None:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM post_deliveries WHERE offer_id = ? "
+            "AND status NOT IN ('sent', 'skipped')",
+            (offer_id,),
+        ).fetchone()
+        return int(row[0]) == 0
+
+    expected = list(dict.fromkeys(channels))
+    if not expected:
+        return False
+    placeholders = ",".join("?" for _ in expected)
     row = conn.execute(
-        "SELECT COUNT(*) FROM post_deliveries WHERE offer_id = ? "
-        "AND status NOT IN ('sent', 'skipped')",
-        (offer_id,),
+        f"SELECT COUNT(DISTINCT channel) FROM post_deliveries "
+        f"WHERE offer_id = ? AND status IN ('sent', 'skipped') "
+        f"AND channel IN ({placeholders})",
+        (offer_id, *expected),
     ).fetchone()
-    return int(row[0]) == 0
+    return int(row[0]) >= len(expected)
 
 
 # --------------------------------------------------------------------- state
@@ -411,6 +447,7 @@ def _row_to_offer(row: sqlite3.Row) -> StoredOffer:
         currency=data["currency"],
         image_url=data["image_url"],
         image_path=data["image_path"],
+        post_text=data["post_text"],
         category=data["category"],
         source_channel=data["source_channel"],
         source_msg_id=data["source_msg_id"],
@@ -444,6 +481,7 @@ __all__ = [
     "next_pending_for_channel",
     "mark_delivery_sent",
     "mark_delivery_failed",
+    "mark_delivery_skipped",
     "count_sent_since",
     "all_channels_delivered",
     "get_state",

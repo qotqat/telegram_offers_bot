@@ -12,11 +12,14 @@ without touching the network.
 from __future__ import annotations
 
 import argparse
+import asyncio
+import logging
 import sys
 
 from app import amazon, db
 from app.config import Config, ConfigError
-from app.logging_setup import setup_logging
+from app.logging_setup import process_log_path, setup_logging
+from app.runtime import notify_error, termination_handler
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -109,8 +112,27 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Config error:\n{exc}", file=sys.stderr)
         return 1
 
-    setup_logging(config.log_path, config.log_level)
+    setup_logging(
+        process_log_path(config.log_path, "amazon"), config.log_level,
+        secrets=(config.bot_token, config.tg_api_hash, config.amazon_credential_secret),
+    )
 
+    def stop() -> None:
+        raise KeyboardInterrupt
+
+    try:
+        with termination_handler(stop):
+            return _run(config, args)
+    except KeyboardInterrupt:
+        print("\nAmazon poller stopped.")
+        return 0
+    except Exception as exc:
+        logging.getLogger(__name__).exception("Amazon poller stopped unexpectedly")
+        asyncio.run(notify_error(config, "amazon", exc))
+        return 1
+
+
+def _run(config: Config, args: argparse.Namespace) -> int:
     if args.dry_run:
         try:
             return dry_run(config)

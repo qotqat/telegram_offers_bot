@@ -48,5 +48,14 @@ def sha256_text(*parts: str) -> str:
     return digest.hexdigest()
 
 
+def utf16_length(text: str) -> int:
+    """Telegram text/caption limits count non-BMP emoji as two code units."""
+    return len(text.encode("utf-16-le")) // 2
+
+
+def truncate_utf16(text: str, limit: int) -> str:
+    return text.encode("utf-16-le")[: max(0, limit) * 2].decode("utf-16-le", errors="ignore")
+
+
 def contains_arabic(text: str) -> bool:
     return bool(_ARABIC_RE.search(text or ""))

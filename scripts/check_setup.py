@@ -38,11 +38,18 @@ def main(argv: list[str] | None = None) -> int:
 
     print("== Configuration ==")
     for label, ok, hint in cfg.account_checklist():
-        if label.startswith("Amazon") and not cfg.amazon_enabled:
+        if label == "Amazon Creators API" and not cfg.amazon_enabled:
             print("[SKIP] Amazon Creators API (optional; Telegram-only launch)")
+            continue
+        if label == "Amazon affiliate tag" and cfg.amazon_link_mode == "plain" and not cfg.amazon_enabled:
+            print("[SKIP] Amazon affiliate tag (plain links; configured tag is not used)")
             continue
         print(f"{_mark(ok)} {label}" + ("" if ok else f"  ({hint})"))
 
+    print("\n[INFO] Values are not ownership or permission checks. Confirm your own")
+    print("       marketplace and bot admin Post messages rights. Only affiliate/API")
+    print("       modes require your own confirmed Amazon Tracking ID.")
+    print("       Send /start to the bot privately to allow owner alerts.")
     print("\n== Non-fatal warnings ==")
     if cfg.warnings:
         for warning in cfg.warnings:
@@ -66,7 +73,8 @@ def main(argv: list[str] | None = None) -> int:
     problems = 0
     for label, checker in (
         ("listener", cfg.require_listener),
-        ("broadcaster/admin", cfg.require_bot),
+        ("broadcaster", cfg.require_broadcaster),
+        ("admin / owner alerts", cfg.require_owner),
     ):
         try:
             checker()

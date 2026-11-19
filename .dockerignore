@@ -1,0 +1,42 @@
+# Deny by default: credentials, runtime state, exports, tests and local tools
+# never enter the build context. Add new runtime source files explicitly.
+**
+!Dockerfile
+!requirements.txt
+!listener.py
+!broadcaster.py
+!admin_bot.py
+!amazon_poller.py
+!app/
+!app/**/*.py
+!scripts/
+!scripts/__init__.py
+!scripts/check_setup.py
+!scripts/init_db.py
+!scripts/list_offers.py
+!scripts/backup.py
+
+# Defense in depth, including inside otherwise allowed source directories.
+.env
+.env.*
+**/.env
+**/.env.*
+**/data
+**/data/**
+**/*.session*
+**/*.db*
+**/*.sqlite*
+**/*.zip
+**/*.log*
+**/__pycache__
+**/__pycache__/**
+**/.venv
+**/.venv/**
+**/venv
+**/venv/**
+**/.git
+**/.git/**
+**/export*
+**/export*/**
+**/backups
+**/backups/**

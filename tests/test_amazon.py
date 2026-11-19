@@ -26,6 +26,7 @@ def make_config(tmp_path: Path, **overrides) -> Config:
         amazon_credential_secret="cred-secret",
         amazon_credential_version="3.1",
         amazon_associate_tag="tag-20",
+        amazon_tag_confirmed=True,
         amazon_marketplace="www.amazon.com",
         amazon_keywords=["headphones"],
         amazon_item_count=10,

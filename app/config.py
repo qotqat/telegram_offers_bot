@@ -33,16 +33,22 @@ def _split_csv(raw: Optional[str]) -> list[str]:
     return [part.strip() for part in raw.split(",") if part.strip()]
 
 
-def _parse_bool(raw: Optional[str], *, name: str, errors: list[str]) -> bool:
+def _parse_bool(
+    raw: Optional[str],
+    *,
+    name: str,
+    errors: list[str],
+    default: bool = False,
+) -> bool:
     if raw is None or raw.strip() == "":
-        return False
+        return default
     value = raw.strip().lower()
     if value in {"1", "true", "yes", "on"}:
         return True
     if value in {"0", "false", "no", "off"}:
         return False
     errors.append(f"{name} must be a boolean (0/1/true/false), got {raw!r}")
-    return False
+    return default
 
 
 def _parse_int(
@@ -112,6 +118,8 @@ class Config:
 
     # Listener behavior
     catchup_limit: int = 50
+    listener_latest_only: bool = True
+    source_poll_interval_seconds: int = 30
     catchup_delay_seconds: float = 1.0
     media_dir: Path = Path("data/media")
     max_image_bytes: int = 1024 * 1024
@@ -124,12 +132,20 @@ class Config:
     max_per_source_per_hour: int = 3
     fuzzy_threshold: float = 88.0
 
+    # Copied-post behavior (Amazon-only, link/tag/brand rewriting)
+    require_amazon_link: bool = True
+    amazon_link_mode: str = "plain"
+    brand_name: str = "Bosla Deals"
+    brand_username: str = "@deals_test"
+    brand_url: str = "https://t.me/deals_test"
+
     # Amazon Creators API (optional at launch)
     amazon_enabled: bool = False
     amazon_credential_id: Optional[str] = None
     amazon_credential_secret: Optional[str] = None
     amazon_credential_version: str = "3.1"
     amazon_associate_tag: Optional[str] = None
+    amazon_tag_confirmed: bool = False
     amazon_marketplace: str = "www.amazon.com"
     amazon_keywords: list[str] = field(default_factory=list)
     amazon_item_count: int = 10
@@ -201,10 +217,9 @@ class Config:
             if dupes:
                 errors.append(f"TARGET_CHANNELS has duplicates: {', '.join(sorted(dupes))}")
 
-        if len(source_channels) != 10:
+        if not source_channels:
             warnings.append(
-                f"SOURCE_CHANNELS has {len(source_channels)} entries; the launch plan "
-                "expects exactly 10"
+                "SOURCE_CHANNELS is empty; the listener has nothing to watch"
             )
 
         catchup_limit = _parse_int(
@@ -279,7 +294,34 @@ class Config:
             maximum=100,
         )
 
-        owner_id = _parse_int(get("OWNER_ID"), name="OWNER_ID", default=None, errors=errors)
+        require_amazon_link = _parse_bool(
+            get("REQUIRE_AMAZON_LINK"),
+            name="REQUIRE_AMAZON_LINK",
+            errors=errors,
+            default=True,
+        )
+        amazon_link_mode = (get("AMAZON_LINK_MODE") or "plain").lower()
+        if amazon_link_mode not in {"plain", "affiliate"}:
+            errors.append("AMAZON_LINK_MODE must be 'plain' or 'affiliate'")
+        brand_name = get("BRAND_NAME") or "Bosla Deals"
+        brand_username = get("BRAND_USERNAME") or "@deals_test"
+        if not brand_username.startswith("@"):
+            brand_username = "@" + brand_username
+        brand_url = get("BRAND_URL") or (
+            "https://t.me/" + brand_username.lstrip("@")
+        )
+
+        owner_raw = get("OWNER_ID")
+        if owner_raw and owner_raw.startswith("@"):
+            errors.append(
+                "OWNER_ID must be your positive numeric Telegram user ID, not a "
+                "username; get the Id value from @userinfobot"
+            )
+            owner_id = None
+        else:
+            owner_id = _parse_int(
+                owner_raw, name="OWNER_ID", default=None, errors=errors, minimum=1
+            )
 
         log_level = (get("LOG_LEVEL") or "INFO").upper()
         if log_level not in VALID_LOG_LEVELS:
@@ -366,6 +408,14 @@ class Config:
             route_rules=route_rules,
             source_channels=source_channels,
             catchup_limit=catchup_limit if catchup_limit is not None else 50,
+            listener_latest_only=_parse_bool(
+                get("LISTENER_LATEST_ONLY"), name="LISTENER_LATEST_ONLY",
+                default=True, errors=errors,
+            ),
+            source_poll_interval_seconds=_parse_int(
+                get("SOURCE_POLL_INTERVAL_SECONDS"), name="SOURCE_POLL_INTERVAL_SECONDS",
+                default=30, minimum=5, errors=errors,
+            ) or 30,
             catchup_delay_seconds=catchup_delay,
             media_dir=Path(get("MEDIA_DIR") or "data/media"),
             max_image_bytes=max_image_bytes or 1024 * 1024,
@@ -375,11 +425,19 @@ class Config:
             max_posts_per_hour=max_per_hour or 10,
             max_per_source_per_hour=max_per_source or 3,
             fuzzy_threshold=fuzzy_threshold,
+            require_amazon_link=require_amazon_link,
+            amazon_link_mode=amazon_link_mode,
+            brand_name=brand_name,
+            brand_username=brand_username,
+            brand_url=brand_url,
             amazon_enabled=amazon_enabled,
             amazon_credential_id=amazon_id,
             amazon_credential_secret=amazon_secret,
             amazon_credential_version=amazon_version,
             amazon_associate_tag=amazon_tag,
+            amazon_tag_confirmed=_parse_bool(
+                get("AMAZON_TAG_CONFIRMED"), name="AMAZON_TAG_CONFIRMED", errors=errors,
+            ),
             amazon_marketplace=amazon_marketplace,
             amazon_keywords=amazon_keywords,
             amazon_item_count=amazon_item_count or 10,
@@ -413,23 +471,69 @@ class Config:
 
     def require_listener(self) -> None:
         """Everything the Telethon listener process needs."""
-        self._require(
-            (
-                ("TG_API_ID", self.tg_api_id),
-                ("TG_API_HASH", self.tg_api_hash),
-                ("SOURCE_CHANNELS", self.source_channels),
-            )
-        )
+        required: list[tuple[str, object]] = [
+            ("TG_API_ID", self.tg_api_id),
+            ("TG_API_HASH", self.tg_api_hash),
+            ("SOURCE_CHANNELS", self.source_channels),
+        ]
+        self._require(required)
+        if self.require_amazon_link:
+            self.require_amazon_links()
 
     def require_bot(self) -> None:
-        """Everything the broadcaster/admin bot needs."""
+        """Everything the broadcaster needs (owner alerts are optional)."""
         self._require(
             (
                 ("BOT_TOKEN", self.bot_token),
-                ("OWNER_ID", self.owner_id),
                 ("TARGET_CHANNELS", self.target_channels),
             )
         )
+
+    def require_amazon_links(self) -> None:
+        """Plain copying never trusts or uses a configured affiliate tag."""
+        if self.amazon_link_mode not in {"plain", "affiliate"}:
+            raise ConfigError("AMAZON_LINK_MODE must be 'plain' or 'affiliate'")
+        self.require_marketplace()
+        if self.amazon_link_mode == "affiliate":
+            self.require_affiliate()
+
+    def require_marketplace(self) -> None:
+        from .links import is_amazon_host, is_short_amazon_link
+
+        self._require((("AMAZON_MARKETPLACE", self.amazon_marketplace),))
+        host = self.amazon_marketplace
+        if (
+            any(char in host for char in "/:@?# ")
+            or not is_amazon_host(host)
+            or is_short_amazon_link("https://" + host)
+        ):
+            raise ConfigError("AMAZON_MARKETPLACE must be an Amazon storefront host")
+
+    def require_affiliate(self) -> None:
+        """Affiliate publishing still requires an explicitly confirmed own tag."""
+        self.require_marketplace()
+        self._require((("AMAZON_ASSOCIATE_TAG", self.amazon_associate_tag),))
+        if not (self.amazon_associate_tag or "").strip():
+            raise ConfigError("AMAZON_ASSOCIATE_TAG must be your own confirmed Tracking ID")
+        if not self.amazon_tag_confirmed:
+            raise ConfigError(
+                "Set AMAZON_TAG_CONFIRMED=1 only after verifying your own Amazon "
+                "Tracking ID and its marketplace in Associates Central"
+            )
+
+    def require_broadcaster(self) -> None:
+        """Validate the selected plain/affiliate publishing mode."""
+        self.require_bot()
+        if self.require_amazon_link:
+            self.require_amazon_links()
+
+    def require_owner(self) -> None:
+        """The numeric owner id used by admin commands and crash alerts."""
+        if type(self.owner_id) is not int or self.owner_id <= 0:
+            raise ConfigError(
+                "OWNER_ID must be your positive numeric Telegram user ID; "
+                "get the Id value from @userinfobot"
+            )
 
     def require_amazon(self) -> None:
         """Everything the Amazon poller needs (only when enabled)."""
@@ -443,6 +547,7 @@ class Config:
                 ("AMAZON_KEYWORDS", self.amazon_keywords),
             )
         )
+        self.require_affiliate()
 
     # ------------------------------------------------------------ helpers
     @property
@@ -452,6 +557,7 @@ class Config:
             and self.amazon_credential_id
             and self.amazon_credential_secret
             and self.amazon_associate_tag
+            and self.amazon_tag_confirmed
             and self.amazon_keywords
         )
 
@@ -479,14 +585,19 @@ class Config:
                 "bot admin with post rights in each",
             ),
             (
-                "Source channels (10)",
-                len(self.source_channels) == 10,
-                f"found {len(self.source_channels)}; listener account must have joined them",
+                "Source channels",
+                bool(self.source_channels),
+                "comma-separated @usernames the listener account has joined",
             ),
             (
                 "Amazon Creators API",
                 self.amazon_ready,
                 "optional for launch (AMAZON_ENABLED=0 = Telegram-only); "
                 "Credential ID + Secret + version 3.x + tag + keywords",
+            ),
+            (
+                "Amazon affiliate tag",
+                bool(self.amazon_associate_tag and self.amazon_tag_confirmed),
+                "verify your own Tracking ID + marketplace, then AMAZON_TAG_CONFIRMED=1",
             ),
         ]

@@ -31,6 +31,8 @@ class Offer:
     source_msg_id: Optional[int] = None
     # Local path of a downloaded image, if we captured media bytes.
     image_path: Optional[str] = None
+    # Final text to post: copied source text with our affiliate link and brand.
+    post_text: Optional[str] = None
 
     def __post_init__(self) -> None:
         self.title = self.title.strip()
@@ -65,6 +67,7 @@ class StoredOffer:
     created_at: Optional[str] = None
     posted_at: Optional[str] = None
     image_path: Optional[str] = None
+    post_text: Optional[str] = None
 
 
 @dataclass(slots=True)

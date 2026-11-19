@@ -21,6 +21,10 @@ def base_env(**overrides: str) -> dict[str, str]:
         "MAX_POSTS_PER_HOUR": "12",
         "MAX_PER_SOURCE_PER_HOUR": "2",
         "FUZZY_THRESHOLD": "90",
+        "AMAZON_LINK_MODE": "affiliate",
+        "AMAZON_ASSOCIATE_TAG": "tag-20",
+        "AMAZON_TAG_CONFIRMED": "1",
+        "AMAZON_MARKETPLACE": "www.amazon.eg",
         "DB_PATH": "data/test.db",
         "LOG_PATH": "data/test.log",
         "LOG_LEVEL": "debug",
@@ -43,6 +47,12 @@ def test_loads_valid_config() -> None:
     assert cfg.max_posts_per_hour == 12
     assert cfg.max_per_source_per_hour == 2
     assert cfg.fuzzy_threshold == 90
+    assert cfg.require_amazon_link is True
+    assert cfg.brand_name == "Bosla Deals"
+    assert cfg.brand_username == "@deals_test"
+    assert cfg.brand_url == "https://t.me/deals_test"
+    assert cfg.amazon_associate_tag == "tag-20"
+    assert cfg.amazon_marketplace == "www.amazon.eg"
     assert cfg.log_level == "DEBUG"
     assert str(cfg.db_path).endswith("test.db")
     assert cfg.warnings == []
@@ -83,10 +93,10 @@ def test_route_mode_without_rules_warns() -> None:
     assert any("ROUTE_RULES is empty" in warning for warning in cfg.warnings)
 
 
-def test_source_count_other_than_ten_warns() -> None:
-    cfg = Config.load(env=base_env(SOURCE_CHANNELS="@only_one"))
-    assert any("exactly 10" in warning for warning in cfg.warnings)
-    assert cfg.source_channels == ["@only_one"]
+def test_empty_source_channels_warns() -> None:
+    cfg = Config.load(env=base_env(SOURCE_CHANNELS=""))
+    assert any("SOURCE_CHANNELS is empty" in warning for warning in cfg.warnings)
+    assert cfg.source_channels == []
 
 
 def test_duplicate_target_channels_is_an_error() -> None:
@@ -197,6 +207,38 @@ def test_require_listener_and_bot() -> None:
         missing.require_bot()
 
 
+def test_amazon_link_requirement_can_be_disabled() -> None:
+    cfg = Config.load(
+        env=base_env(REQUIRE_AMAZON_LINK="0", AMAZON_ASSOCIATE_TAG="")
+    )
+    assert cfg.require_amazon_link is False
+    cfg.require_listener()  # no affiliate tag needed on the generic path
+
+
+def test_listener_requires_affiliate_tag_for_amazon_copying() -> None:
+    cfg = Config.load(env=base_env(AMAZON_ASSOCIATE_TAG=""))
+    assert cfg.require_amazon_link is True
+    with pytest.raises(ConfigError, match="AMAZON_ASSOCIATE_TAG"):
+        cfg.require_listener()
+
+
+def test_brand_defaults_and_overrides() -> None:
+    defaults = Config.load(env=base_env())
+    assert defaults.brand_name == "Bosla Deals"
+    assert defaults.brand_username == "@deals_test"
+
+    custom = Config.load(
+        env=base_env(
+            BRAND_NAME="My Deals",
+            BRAND_USERNAME="mychannel",
+            BRAND_URL="https://t.me/mychannel",
+        )
+    )
+    assert custom.brand_name == "My Deals"
+    assert custom.brand_username == "@mychannel"
+    assert custom.brand_url == "https://t.me/mychannel"
+
+
 def test_loads_from_dotenv_file(tmp_path, monkeypatch) -> None:
     for key in base_env():
         monkeypatch.delenv(key, raising=False)
@@ -210,8 +252,44 @@ def test_loads_from_dotenv_file(tmp_path, monkeypatch) -> None:
     assert cfg.owner_id == 42
 
 
+@pytest.mark.parametrize("mode", ["plain", "PLAIN"])
+def test_plain_mode_ignores_unconfirmed_tag_and_needs_no_api(mode):
+    cfg = Config.load(env=base_env(
+        AMAZON_LINK_MODE=mode, AMAZON_ASSOCIATE_TAG="", AMAZON_TAG_CONFIRMED="0",
+        AMAZON_ENABLED="0",
+    ))
+    assert cfg.amazon_link_mode == "plain"
+    cfg.require_listener()
+    cfg.require_broadcaster()
+
+
+def test_link_mode_defaults_to_plain():
+    env = base_env(AMAZON_ASSOCIATE_TAG="", AMAZON_TAG_CONFIRMED="0")
+    env.pop("AMAZON_LINK_MODE")
+    cfg = Config.load(env=env)
+    assert cfg.amazon_link_mode == "plain"
+    cfg.require_listener()
+
+
+@pytest.mark.parametrize("field,value", [
+    ("AMAZON_LINK_MODE", "unknown"), ("LISTENER_LATEST_ONLY", "unknown"),
+    ("SOURCE_POLL_INTERVAL_SECONDS", "0"), ("SOURCE_POLL_INTERVAL_SECONDS", "4"),
+])
+def test_copy_mode_and_monitoring_settings_are_validated(field, value):
+    with pytest.raises(ConfigError, match=field):
+        Config.load(env=base_env(**{field: value}))
+
+
+def test_latest_monitoring_overrides_are_loaded():
+    cfg = Config.load(env=base_env(LISTENER_LATEST_ONLY="0", SOURCE_POLL_INTERVAL_SECONDS="45"))
+    assert cfg.listener_latest_only is False
+    assert cfg.source_poll_interval_seconds == 45
+
+
 def test_listener_defaults_and_overrides() -> None:
     defaults = Config.load(env=base_env())
+    assert defaults.listener_latest_only is True
+    assert defaults.source_poll_interval_seconds == 30
     assert defaults.catchup_limit == 50
     assert defaults.catchup_delay_seconds == 1.0
     assert defaults.max_image_bytes == 1024 * 1024
@@ -234,3 +312,32 @@ def test_listener_defaults_and_overrides() -> None:
 def test_max_image_bytes_has_sane_minimum() -> None:
     with pytest.raises(ConfigError, match="MAX_IMAGE_BYTES"):
         Config.load(env=base_env(MAX_IMAGE_BYTES="100"))
+
+
+@pytest.mark.parametrize("value", ["@Mahmoud_Qotqat", "0", "-100"])
+def test_owner_must_be_a_positive_numeric_user_id(value):
+    with pytest.raises(ConfigError, match="OWNER_ID"):
+        Config.load(env=base_env(OWNER_ID=value))
+
+
+@pytest.mark.parametrize("value", [None, 0, -100, "@owner", True])
+def test_require_owner_rejects_unsafe_dataclass_values(value):
+    with pytest.raises(ConfigError, match="OWNER_ID"):
+        Config(owner_id=value).require_owner()
+
+
+def test_tag_confirmation_is_explicit_not_inferred_from_presence():
+    config = Config.load(env=base_env(AMAZON_TAG_CONFIRMED=""))
+    assert config.amazon_tag_confirmed is False
+    with pytest.raises(ConfigError, match="AMAZON_TAG_CONFIRMED"):
+        config.require_listener()
+    with pytest.raises(ConfigError, match="AMAZON_TAG_CONFIRMED"):
+        config.require_broadcaster()
+    config.require_bot()  # admin can run before affiliate setup is complete
+
+
+@pytest.mark.parametrize("host", ["example.com", "amzn.to", "link.amazon", "www.amazon.com/path", "amazon.com@evil.example"])
+def test_affiliate_marketplace_is_validated_even_when_api_disabled(host):
+    config = Config.load(env=base_env(AMAZON_MARKETPLACE=host, AMAZON_ENABLED="0"))
+    with pytest.raises(ConfigError, match="AMAZON_MARKETPLACE"):
+        config.require_affiliate()

@@ -1,0 +1,59 @@
+x-storage: &storage
+  TG_SESSION_PATH: /data/listener_session
+  DB_PATH: /data/offers.db
+  MEDIA_DIR: /data/media
+
+x-service: &service
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: telegram-offers-bot:local
+  env_file:
+    - .env
+  volumes:
+    - ./data:/data
+  restart: unless-stopped
+  init: true
+  stop_signal: SIGTERM
+  stop_grace_period: 30s
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  logging:
+    driver: json-file
+    options:
+      max-size: "5m"
+      max-file: "3"
+
+services:
+  listener:
+    <<: *service
+    command: ["python", "listener.py", "--non-interactive"]
+    environment:
+      <<: *storage
+      LOG_PATH: /data/logs/listener.log
+
+  broadcaster:
+    <<: *service
+    command: ["python", "broadcaster.py"]
+    environment:
+      <<: *storage
+      LOG_PATH: /data/logs/broadcaster.log
+
+  admin:
+    <<: *service
+    command: ["python", "admin_bot.py"]
+    environment:
+      <<: *storage
+      LOG_PATH: /data/logs/admin.log
+
+  amazon:
+    <<: *service
+    profiles: ["amazon"]
+    command: ["python", "amazon_poller.py"]
+    # AMAZON_ENABLED=0 exits successfully; do not restart that disabled poller.
+    restart: "on-failure:3"
+    environment:
+      <<: *storage
+      LOG_PATH: /data/logs/amazon.log
