@@ -219,9 +219,12 @@ a hidden text entity, or an inline button.
    skipped — the bot never publishes someone else's affiliate tag.
 5. Source display names, `@usernames`, `t.me` channel links and private invite
    links are replaced with `BRAND_NAME`, `BRAND_USERNAME` and `BRAND_URL`.
-6. The finished text is stored in `offers.post_text` and posted verbatim (plain
-   text, so Telegram auto-links the URLs). Posts without an Amazon link are
-   ignored before filtering, so they never consume the queue.
+6. If a post has no direct Amazon link, the listener resolves each public
+   http(s) link in the post (up to 5 per post, skipping Telegram/social links).
+   HTTP redirects, `meta refresh` tags and common JavaScript redirects are
+   followed. If any link lands on an Amazon product page, the original
+   third-party link is replaced with our canonical/affiliate link before
+   filtering. If no link reaches Amazon, the post is ignored.
 
 Plain Amazon-only ingestion and live publishing require a valid marketplace,
 **not** `AMAZON_ASSOCIATE_TAG` or `AMAZON_TAG_CONFIRMED=1`. Affiliate mode requires

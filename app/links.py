@@ -7,17 +7,14 @@ marketplace, and attach our own partner tag. The copied text is then cleaned of
 the source channel's username/display name and branded as ours.
 """
 
-from __future__ import annotations
-
+import html
+import ipaddress
 import logging
 import re
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Callable, Iterable, Optional
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
-
-from .ingest import clean_url
-from .utils import truncate_utf16
+from typing import Callable, Iterable, Mapping, Optional
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 log = logging.getLogger(__name__)
 
@@ -98,6 +95,42 @@ _USER_AGENT = (
     "Chrome/124.0 Safari/537.36"
 )
 
+_MAX_REDIRECT_HOPS = 6
+_HTML_REDIRECT_BYTES = 64 * 1024
+_FOREIGN_LINK_LOOKUP_LIMIT = 5
+
+# Links that cannot be Amazon product redirects.
+_FOREIGN_SKIP_HOSTS = {
+    "t.me",
+    "telegram.me",
+    "telegram.dog",
+    "instagram.com",
+    "facebook.com",
+    "fb.com",
+    "twitter.com",
+    "x.com",
+    "youtube.com",
+    "youtu.be",
+    "tiktok.com",
+    "pinterest.com",
+    "snapchat.com",
+    "threads.net",
+}
+
+_META_TAG_RE = re.compile(r"<meta\b[^>]*>", re.IGNORECASE)
+_META_CONTENT_RE = re.compile(
+    r"content\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s>]+))",
+    re.IGNORECASE,
+)
+_META_URL_RE = re.compile(r"url\s*=\s*([^;\"'\s>]+)", re.IGNORECASE)
+_JS_HREF_RE = re.compile(
+    r"(?:window\.)?location(?:\.href)?\s*=\s*[\"']([^\"']+)[\"']",
+    re.IGNORECASE,
+)
+_JS_CALL_RE = re.compile(
+    r"location\.(?:replace|assign)\s*\(\s*[\"']([^\"']+)[\"']",
+    re.IGNORECASE,
+)
 
 @dataclass(slots=True)
 class RewriteResult:
@@ -187,26 +220,168 @@ def extract_asin(url: str) -> Optional[str]:
 
 
 # ------------------------------------------------------------------ resolution
+def _is_public_http_url(url: str) -> bool:
+    """Reject non-http(s) and obvious local/private targets."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return False
+    if parts.scheme.lower() not in {"http", "https"}:
+        return False
+    if parts.username is not None or parts.password is not None:
+        return False
+
+    host = (parts.hostname or "").lower().rstrip(".")
+    if not host or host == "localhost" or host.endswith(".local"):
+        return False
+    if any(
+        host == item or host.endswith("." + item)
+        for item in _FOREIGN_SKIP_HOSTS
+    ):
+        return False
+
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return True
+
+    return not (
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_reserved
+        or address.is_multicast
+        or address.is_unspecified
+    )
+
+
+def _meta_refresh_target(text: str) -> Optional[str]:
+    for tag in _META_TAG_RE.findall(text):
+        lower = tag.lower()
+        if "http-equiv" not in lower or "refresh" not in lower:
+            continue
+        content = _META_CONTENT_RE.search(tag)
+        if not content:
+            continue
+        value = next(
+            (group for group in content.groups() if group is not None),
+            "",
+        )
+        match = _META_URL_RE.search(value)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _js_redirect_target(text: str) -> Optional[str]:
+    match = _JS_HREF_RE.search(text) or _JS_CALL_RE.search(text)
+    return match.group(1) if match else None
+
+
+def _html_redirect_target(body: bytes, base: str) -> Optional[str]:
+    if not body:
+        return None
+    text = body.decode("utf-8", "ignore")
+    target = _meta_refresh_target(text) or _js_redirect_target(text)
+    if not target:
+        return None
+
+    target = html.unescape(target.strip().strip("'\""))
+    if not target or target.lower().startswith(
+        ("javascript:", "data:", "mailto:", "#")
+    ):
+        return None
+
+    target = urljoin(base, target)
+    return target if _is_public_http_url(target) else None
+    
 def resolve_amazon_url(url: str, *, timeout: float = 10.0) -> Optional[str]:
-    """Follow redirects and return the final URL, or None on failure."""
+    """Follow HTTP and HTML redirects and return the final URL, or None."""
     if url in _RESOLVE_CACHE:
         return _RESOLVE_CACHE[url]
 
-    request = urllib.request.Request(
-        url, headers={"User-Agent": _USER_AGENT, "Accept": "text/html,*/*"}
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            final = response.geturl()
-    except Exception as exc:  # noqa: BLE001 - one bad link must not kill ingestion
-        log.warning("could not resolve Amazon link %s: %s", url, exc)
-        final = None
+    current = clean_url(url)
+    if not current or not _is_public_http_url(current):
+        return None
+
+    final: Optional[str] = None
+    for _ in range(_MAX_REDIRECT_HOPS):
+        # A direct Amazon product URL needs no network request.
+        if is_amazon_link(current) and not is_short_amazon_link(current):
+            final = current
+            break
+
+        request = urllib.request.Request(
+            current,
+            headers={
+                "User-Agent": _USER_AGENT,
+                "Accept": "text/html,*/*",
+                "Accept-Encoding": "identity",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                final = response.geturl()
+                body = (
+                    b""
+                    if is_amazon_link(final)
+                    else response.read(_HTML_REDIRECT_BYTES)
+                )
+        except Exception as exc:  # noqa: BLE001 - one bad link must not kill ingestion
+            log.warning("could not resolve link %s: %s", current, exc)
+            final = None
+            break
+
+        if not final or is_amazon_link(final):
+            break
+
+        target = _html_redirect_target(body, final)
+        if not target or target == current:
+            break
+        current = target
 
     if final is not None:
         if len(_RESOLVE_CACHE) > 2048:
             _RESOLVE_CACHE.clear()
         _RESOLVE_CACHE[url] = final
     return final
+
+def resolve_foreign_amazon_links(
+    urls: Iterable[str],
+    *,
+    resolver: Optional[Resolver] = None,
+    limit: int = _FOREIGN_LINK_LOOKUP_LIMIT,
+) -> dict[str, str]:
+    """Resolve non-Amazon links and return ``{original: amazon_url}``.
+
+    Telegram/social links are skipped, and the number of network lookups per
+    post is capped. This is what lets a post whose only link is a third-party
+    redirect still be ingested as an Amazon deal.
+    """
+    resolve = resolver or resolve_amazon_url
+    found: dict[str, str] = {}
+    seen: set[str] = set()
+    attempts = 0
+
+    for raw in urls:
+        cleaned = clean_url(raw)
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+
+        if is_amazon_link(cleaned):
+            continue
+        if not _is_public_http_url(cleaned):
+            continue
+        if attempts >= limit:
+            break
+
+        attempts += 1
+        final = resolve(cleaned)
+        if final and is_amazon_link(final):
+            found[cleaned] = final
+
+    return found
 
 
 # ------------------------------------------------------------------- affiliate
@@ -323,19 +498,26 @@ def rewrite_amazon_links(
     marketplace: str,
     partner_tag: str,
     resolver: Optional[Resolver] = None,
+    foreign_links: Optional[Mapping[str, str]] = None,
 ) -> RewriteResult:
-    """Replace every Amazon URL in ``text`` with our affiliate link."""
+    """Replace every Amazon URL, and mapped foreign redirect, with our link."""
     links: list[str] = []
     failed: list[str] = []
+    foreign = foreign_links or {}
 
     def replace(match: re.Match[str]) -> str:
         raw = match.group(0)
         cleaned = raw.rstrip(_TRAILING_PUNCTUATION)
         trailing = raw[len(cleaned):]
+
+        target = cleaned
         if not is_amazon_link(cleaned):
-            return raw
+            target = foreign.get(cleaned) or ""
+            if not target:
+                return raw
+
         link = affiliate_link(
-            cleaned,
+            target,
             marketplace=marketplace,
             partner_tag=partner_tag,
             resolver=resolver,
@@ -343,6 +525,7 @@ def rewrite_amazon_links(
         if link is None:
             failed.append(cleaned)
             return raw
+
         links.append(link)
         return link + trailing
 
@@ -421,6 +604,7 @@ def build_post_text(
     brand_username: str,
     brand_url: str,
     resolver: Optional[Resolver] = None,
+    foreign_links: Optional[Mapping[str, str]] = None,
 ) -> RewriteResult:
     """Rewrite links/names and guarantee the copied text contains our link."""
     rewritten = rewrite_amazon_links(
@@ -428,10 +612,13 @@ def build_post_text(
         marketplace=marketplace,
         partner_tag=partner_tag,
         resolver=resolver,
+        foreign_links=foreign_links,
     )
+
     final = rewritten.text.strip()
     if primary_link and primary_link not in final:
         final = f"{final}\n\n{primary_link}".strip()
+
     final = replace_source_names(
         final,
         source_names=source_names,
@@ -445,7 +632,6 @@ def build_post_text(
         links=rewritten.links,
         failed=rewritten.failed,
     )
-
 
 def fallback_text(offer) -> str:
     """Generate post text for rows without copied text (e.g. Amazon poller)."""
@@ -475,8 +661,9 @@ __all__ = [
     "is_amazon_link",
     "is_short_amazon_link",
     "post_urls",
-    "truncate_post_text",
-    "replace_source_names",
+    "resolve_foreign_amazon_links",
     "resolve_amazon_url",
     "rewrite_amazon_links",
+    "truncate_post_text",
+    "replace_source_names",
 ]

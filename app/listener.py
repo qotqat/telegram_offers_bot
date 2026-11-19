@@ -25,7 +25,7 @@ from .config import Config
 from .ingest import BuildFailure, build_offer, pick_deal_url, replace_title
 from .links import (
     affiliate_link, build_post_text, extract_asin, has_owned_amazon_links,
-    has_plain_amazon_links, is_amazon_link, post_urls,
+    has_plain_amazon_links, is_amazon_link, post_urls, resolve_foreign_amazon_links
 )
 from .products import ProductLookupError, fetch_product_title
 from .runtime import notify_error
@@ -179,9 +179,23 @@ async def _process_message(
     urls = collect_urls(message)
     amazon_urls = [url for url in urls if is_amazon_link(url)]
 
+    # A source may post a third-party redirect (for example 3rrood.com) that
+    # lands on Amazon with the source's affiliate tag. Follow those links
+    # before deciding the post has no Amazon link.
+    foreign_links: dict[str, str] = {}
+    if config.require_amazon_link and urls:
+        foreign_links = await asyncio.to_thread(
+            resolve_foreign_amazon_links,
+            urls,
+            resolver=resolver,
+        )
+        if not amazon_urls:
+            amazon_urls = list(foreign_links.values())
+
     if config.require_amazon_link and not amazon_urls:
         log.info("skip %s/%s: no Amazon link", channel_label, msg_id)
         return None
+
     candidate_urls = amazon_urls if amazon_urls else urls
     product_title = None
     post_text = None
@@ -215,6 +229,7 @@ async def _process_message(
             partner_tag=partner_tag or "", brand_name=config.brand_name,
             brand_username=config.brand_username, brand_url=config.brand_url,
             resolver=resolver,
+            foreign_links=foreign_links,
         )
         if post.failed:
             log.warning("skip %s/%s: %d Amazon link(s) could not be rewritten",

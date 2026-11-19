@@ -312,16 +312,23 @@ def test_amazon_post_is_copied_with_our_link_and_brand(conn, amazon_config) -> N
     assert "Amazon.com" not in stored.post_text
 
 
-def test_non_amazon_post_is_ignored_when_amazon_required(conn, amazon_config) -> None:
+def test_non_amazon_post_is_ignored_when_amazon_required(
+    conn, amazon_config
+) -> None:
     message = fake_message(
         msg_id=402,
         text="Air Fryer\nPrice: $49.99\nhttps://shop.example.com/p/1",
     )
-
     offer_id = asyncio.run(
-        process_message(FakeClient(), message, "@chan", conn=conn, config=amazon_config)
+        process_message(
+            FakeClient(),
+            message,
+            "@chan",
+            conn=conn,
+            config=amazon_config,
+            resolver=lambda url: None,
+        )
     )
-
     assert offer_id is None
     assert conn.execute("SELECT COUNT(*) FROM offers").fetchone()[0] == 0
 
@@ -425,3 +432,50 @@ def test_every_amazon_link_is_rewritten(conn, amazon_config) -> None:
     assert "their-20" not in stored.post_text
     assert "their-21" not in stored.post_text
     assert stored.post_text.count("tag=ours-21") == 2
+
+def test_third_party_redirect_link_is_resolved_and_rewritten(
+    conn, amazon_config
+) -> None:
+    resolved: list[str] = []
+
+    def resolver(url: str) -> str:
+        resolved.append(url)
+        return (
+            "https://www.amazon.eg/dp/B0CH8DKDKN?"
+            "tag=their-21&linkCode=sl2"
+        )
+
+    message = fake_message(
+        msg_id=407,
+        text=(
+            "Wireless Earbuds\n"
+            "Price: 999 EGP\n"
+            "https://3rrood.com/PHVVsLyN\n"
+            "More: https://t.me/deals_me"
+        ),
+    )
+
+    offer_id = asyncio.run(
+        process_message(
+            FakeClient(),
+            message,
+            "@deals_me",
+            conn=conn,
+            config=amazon_config,
+            source_names=("Deals Me",),
+            source_usernames=("deals_me",),
+            resolver=resolver,
+        )
+    )
+
+    assert offer_id is not None
+    assert set(resolved) == {"https://3rrood.com/PHVVsLyN"}
+
+    stored = db.get_offer(conn, offer_id)
+    assert stored is not None
+    assert stored.link == (
+        "https://www.amazon.eg/dp/B0CH8DKDKN?tag=ours-21"
+    )
+    assert "3rrood.com" not in stored.post_text
+    assert "their-21" not in stored.post_text
+    assert "tag=ours-21" in stored.post_text

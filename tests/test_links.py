@@ -15,6 +15,7 @@ from app.links import (
     is_amazon_link,
     is_short_amazon_link,
     replace_source_names,
+    resolve_foreign_amazon_links
     rewrite_amazon_links,
 )
 
@@ -244,3 +245,99 @@ def test_fallback_text_has_title_price_and_link() -> None:
     assert "299 USD" in text
     assert "-25.1%" in text
     assert "tag=ours-21" in text
+
+def test_resolve_foreign_amazon_links_follows_third_party_redirect() -> None:
+    calls: list[str] = []
+
+    def resolver(url: str) -> str:
+        calls.append(url)
+        return (
+            "https://www.amazon.eg/dp/B0CH8DKDKN?"
+            "tag=their-21&linkCode=sl2"
+        )
+
+    result = resolve_foreign_amazon_links(
+        ["https://t.me/deals_me", "https://3rrood.com/PHVVsLyN"],
+        resolver=resolver,
+    )
+
+    assert calls == ["https://3rrood.com/PHVVsLyN"]
+    assert result == {
+        "https://3rrood.com/PHVVsLyN":
+            "https://www.amazon.eg/dp/B0CH8DKDKN?tag=their-21&linkCode=sl2"
+    }
+
+
+def test_resolve_foreign_amazon_links_ignores_non_amazon_destination() -> None:
+    calls: list[str] = []
+
+    def resolver(url: str) -> str:
+        calls.append(url)
+        return "https://shop.example.com/landing"
+
+    result = resolve_foreign_amazon_links(
+        ["https://3rrood.com/not-amazon"],
+        resolver=resolver,
+    )
+
+    assert calls == ["https://3rrood.com/not-amazon"]
+    assert result == {}
+
+
+def test_resolve_foreign_amazon_links_rejects_private_hosts() -> None:
+    calls: list[str] = []
+
+    def resolver(url: str) -> str:
+        calls.append(url)
+        return "https://www.amazon.eg/dp/B0CH8DKDKN"
+
+    result = resolve_foreign_amazon_links(
+        ["http://127.0.0.1/internal", "http://10.0.0.5/internal"],
+        resolver=resolver,
+    )
+
+    assert calls == []
+    assert result == {}
+
+
+def test_rewrite_amazon_links_replaces_foreign_redirect() -> None:
+    result = rewrite_amazon_links(
+        "Deal https://3rrood.com/PHVVsLyN now",
+        marketplace=MARKETPLACE,
+        partner_tag=TAG,
+        foreign_links={
+            "https://3rrood.com/PHVVsLyN":
+                "https://www.amazon.eg/dp/B0CH8DKDKN?tag=their-21"
+        },
+    )
+
+    assert result.text == (
+        "Deal https://www.amazon.eg/dp/B0CH8DKDKN?tag=ours-21 now"
+    )
+    assert result.links == [
+        "https://www.amazon.eg/dp/B0CH8DKDKN?tag=ours-21"
+    ]
+    assert result.failed == []
+
+
+def test_resolve_url_follows_meta_refresh(monkeypatch) -> None:
+    from unittest.mock import MagicMock, Mock
+    from app import links
+
+    response = MagicMock()
+    response.__enter__.return_value.geturl.return_value = (
+        "https://3rrood.com/PHVVsLyN"
+    )
+    response.__enter__.return_value.read.return_value = (
+        b'<meta http-equiv="refresh" '
+        b'content="0;url=https://www.amazon.eg/dp/B0CH8DKDKN?tag=their-21">'
+    )
+
+    request = Mock(return_value=response)
+    monkeypatch.setattr(links.urllib.request, "urlopen", request)
+    monkeypatch.setattr(links, "_RESOLVE_CACHE", {})
+
+    assert links.resolve_amazon_url("https://3rrood.com/PHVVsLyN") == (
+        "https://www.amazon.eg/dp/B0CH8DKDKN?tag=their-21"
+    )
+    assert request.call_count == 1
